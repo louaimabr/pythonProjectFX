@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import matplotlib.pyplot as plt
+from sklearn.linear_model import LinearRegression
 
 # -------------------------
 # PAGE CONFIG & GLOBAL STYLE
@@ -29,7 +30,8 @@ st.title("💱 FX Analytics Dashboard")
 
 st.markdown(
     """
-    Analyse foreign exchange rates with **trend**, **volatility**, and **return distribution** metrics.
+    Analyse foreign exchange rates with **trend**, **volatility**, **momentum**, 
+    **risk metrics**, and a simple **forecasting model**.
     
     Select a currency pair and period in the sidebar, then click **Run analysis**.
     """
@@ -40,39 +42,75 @@ st.markdown(
 # -------------------------
 st.sidebar.header("Settings")
 
-# Popular FX pairs (Yahoo Finance tickers)
-default_pairs = [
-    "EURUSD=X",
-    "GBPUSD=X",
-    "USDJPY=X",
-    "EURGBP=X",
-    "EURJPY=X",
-]
+# Map nice labels → Yahoo Finance tickers
+FX_PAIRS = {
+    "EUR / USD": "EURUSD=X",
+    "EUR / GBP": "EURGBP=X",
+    "EUR / JPY": "EURJPY=X",
+    "EUR / CHF": "EURCHF=X",
+    "EUR / CAD": "EURCAD=X",
+    "EUR / AUD": "EURAUD=X",
+    "EUR / NZD": "EURNZD=X",
+    "EUR / SEK": "EURSEK=X",
+    "EUR / NOK": "EURNOK=X",
+    "EUR / DKK": "EURDKK=X",
+    "EUR / PLN": "EURPLN=X",
+    "EUR / TRY": "EURTRY=X",
+    "EUR / ZAR": "EURZAR=X",
+    "EUR / BRL (Brazilian real)": "EURBRL=X",
+    "EUR / MXN (Mexican peso)": "EURMXN=X",
+    "EUR / MAD (Moroccan dirham)": "EURMAD=X",
+    "EUR / VND (Vietnamese dong)": "EURVND=X",
+    "USD / JPY": "USDJPY=X",
+    "USD / MXN (Mexican peso)": "USDMXN=X",
+    "USD / BRL (Brazilian real)": "USDBRL=X",
+    "USD / ZAR (South African rand)": "USDZAR=X",
+}
 
-ticker = st.sidebar.selectbox("Select FX pair (Yahoo Finance ticker):", default_pairs)
+pair_label = st.sidebar.selectbox(
+    "Select FX pair:",
+    list(FX_PAIRS.keys()),
+    index=0
+)
+ticker = FX_PAIRS[pair_label]  # used for yfinance
+
 period = st.sidebar.selectbox("History period:", ["6mo", "1y", "2y", "5y"], index=1)
 
 st.sidebar.markdown(
     """
-    _Tip_: You can search the ticker on Yahoo Finance and copy it here
-    if you want to extend the list later.
+    _Tip_: These are common FX crosses.  
+    You can also look up extra tickers on Yahoo Finance and add them to this list.
     """
 )
 
 # -------------------------
-# HELPER
+# HELPERS
 # -------------------------
 def safe_last(series: pd.Series) -> float:
     """Return last non-NaN value of a Series, or NaN if empty."""
     s = series.dropna()
     return s.iloc[-1] if not s.empty else np.nan
 
+def compute_rsi(series: pd.Series, window: int = 14) -> pd.Series:
+    """Compute a simple RSI with given window length."""
+    delta = series.diff()
+
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+
+    avg_gain = gain.rolling(window=window, min_periods=window).mean()
+    avg_loss = loss.rolling(window=window, min_periods=window).mean()
+
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
 # -------------------------
 # MAIN LOGIC
 # -------------------------
 if st.sidebar.button("Run analysis"):
 
-    with st.spinner("Downloading data from Yahoo Finance..."):
+    with st.spinner(f"Downloading data for {pair_label} from Yahoo Finance..."):
         try:
             data = yf.download(ticker, period=period, progress=False)
         except Exception as e:
@@ -87,11 +125,11 @@ if st.sidebar.button("Run analysis"):
         # -------------------------
         close = data["Close"].copy()
 
-        # In some versions, this can be a DataFrame (e.g. MultiIndex) → take first column
+        # Sometimes this is a DataFrame (MultiIndex) → take first column
         if isinstance(close, pd.DataFrame):
             close = close.iloc[:, 0]
 
-        close.name = ticker
+        close.name = pair_label
 
         # -------------------------
         # 2. CORE ANALYTICS
@@ -106,6 +144,13 @@ if st.sidebar.button("Run analysis"):
         sma20 = close.rolling(20).mean()
         sma50 = close.rolling(50).mean()
 
+        # Momentum (RSI 14d)
+        rsi14 = compute_rsi(close, window=14)
+
+        # Risk metrics: VaR & ES at 95%
+        VaR_95 = returns.quantile(0.05)
+        ES_95 = returns[returns <= VaR_95].mean()
+
         # Latest metrics
         last_price = safe_last(close)
         last_vol30 = safe_last(vol30)
@@ -114,7 +159,7 @@ if st.sidebar.button("Run analysis"):
         # -------------------------
         # OVERVIEW + METRICS
         # -------------------------
-        st.markdown(f"### {ticker} overview")
+        st.markdown(f"### {pair_label} overview")
 
         col1, col2, col3 = st.columns(3)
         with col1:
@@ -133,8 +178,15 @@ if st.sidebar.button("Run analysis"):
         # -------------------------
         # TABS: PLOTS & STATS
         # -------------------------
-        tab1, tab2, tab3, tab4 = st.tabs(
-            ["📈 Price & MAs", "📉 Volatility", "📊 Returns distribution", "📌 Stats table"]
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+            [
+                "📈 Price & MAs",
+                "📉 Volatility",
+                "📊 Returns distribution",
+                "📐 Momentum (RSI)",
+                "📌 Stats table",
+                "🔮 Forecasting",
+            ]
         )
 
         # ---- TAB 1: PRICE & MAs ----
@@ -147,7 +199,7 @@ if st.sidebar.button("Run analysis"):
             ax1.plot(sma50.index, sma50, label="SMA 50", linewidth=1)
             ax1.set_xlabel("Date")
             ax1.set_ylabel("Price")
-            ax1.set_title(f"{ticker} - Price & Moving Averages")
+            ax1.set_title(f"{pair_label} - Price & Moving Averages")
             ax1.legend()
             ax1.grid(True)
             st.pyplot(fig1)
@@ -161,7 +213,7 @@ if st.sidebar.button("Run analysis"):
             ax2.plot(vol90.index, vol90, label="90-day Vol", linewidth=1)
             ax2.set_xlabel("Date")
             ax2.set_ylabel("Volatility")
-            ax2.set_title(f"{ticker} - Rolling Annualized Volatility")
+            ax2.set_title(f"{pair_label} - Rolling Annualized Volatility")
             ax2.legend()
             ax2.grid(True)
             st.pyplot(fig2)
@@ -174,11 +226,32 @@ if st.sidebar.button("Run analysis"):
             ax3.hist(returns.dropna(), bins=40, alpha=0.7)
             ax3.set_xlabel("Daily Return")
             ax3.set_ylabel("Frequency")
-            ax3.set_title(f"{ticker} - Histogram of Daily Returns")
+            ax3.set_title(f"{pair_label} - Histogram of Daily Returns")
             st.pyplot(fig3)
 
-        # ---- TAB 4: SUMMARY STATISTICS ----
+        # ---- TAB 4: MOMENTUM (RSI) ----
         with tab4:
+            st.subheader("14-day Relative Strength Index (RSI)")
+
+            fig4, ax4 = plt.subplots(figsize=(10, 3))
+            ax4.plot(rsi14.index, rsi14, linewidth=1)
+            ax4.axhline(70, linestyle="--")
+            ax4.axhline(30, linestyle="--")
+            ax4.set_ylim(0, 100)
+            ax4.set_xlabel("Date")
+            ax4.set_ylabel("RSI")
+            ax4.set_title(f"{pair_label} - RSI (14d)")
+            st.pyplot(fig4)
+
+            st.markdown(
+                """
+                - RSI above **70** is often interpreted as **overbought** (strong recent appreciation).
+                - RSI below **30** is often interpreted as **oversold** (strong recent depreciation).
+                """
+            )
+
+        # ---- TAB 5: SUMMARY STATISTICS ----
+        with tab5:
             st.subheader("Summary Statistics")
 
             stats = pd.DataFrame({
@@ -186,9 +259,68 @@ if st.sidebar.button("Run analysis"):
                 "Std daily return": [returns.std()],
                 "Annualized vol (last 30d)": [last_vol30],
                 "Annualized vol (last 90d)": [last_vol90],
+                "VaR 95% (daily)": [VaR_95],
+                "Expected Shortfall 95% (daily)": [ES_95],
             }).T
             stats.columns = ["Value"]
             st.table(stats)
+
+        # ---- TAB 6: FORECASTING ----
+        with tab6:
+            st.subheader("30-day Linear Trend Forecast (using last 120 days)")
+
+            series = close.dropna()
+            if len(series) < 40:
+                st.warning("Not enough data to build a meaningful forecast (need at least 40 observations).")
+            else:
+                horizon = 30
+                lookback = min(120, len(series))  # use last 120 days (or fewer if not available)
+
+                recent = series.iloc[-lookback:]
+                X = np.arange(len(recent)).reshape(-1, 1)
+                y = recent.values
+
+                model = LinearRegression()
+                model.fit(X, y)
+
+                X_future = np.arange(len(recent), len(recent) + horizon).reshape(-1, 1)
+                y_future = model.predict(X_future)
+
+                last_date = recent.index[-1]
+                future_index = pd.date_range(last_date + pd.Timedelta(days=1),
+                                             periods=horizon, freq="D")
+
+                forecast_series = pd.Series(y_future, index=future_index, name="Forecast")
+
+                fig6, ax6 = plt.subplots(figsize=(10, 4))
+                ax6.plot(recent.index, recent, label="Historical (recent window)", linewidth=1)
+                ax6.plot(
+                    forecast_series.index,
+                    forecast_series,
+                    label="Forecast (linear regression)",
+                    linestyle="--",
+                    linewidth=2,
+                )
+                ax6.set_xlabel("Date")
+                ax6.set_ylabel("Price")
+                ax6.set_title(
+                    f"{pair_label} - {horizon}-day Linear Trend Forecast "
+                    f"(using last {lookback} days)"
+                )
+                ax6.legend()
+                ax6.grid(True)
+                st.pyplot(fig6)
+
+                st.markdown(
+                    """
+                    This forecast uses a **linear regression** fitted on the last 120 days 
+                    of data (or fewer if not available) and extends that trend 30 days 
+                    into the future.
+
+                    In practice, FX rates often behave close to a random walk, so this is mainly an 
+                    **illustrative forecasting exercise**, not a trading signal.
+                    """
+                )
 
 else:
     st.info("Use the sidebar to select a pair and click **Run analysis** to start.")
