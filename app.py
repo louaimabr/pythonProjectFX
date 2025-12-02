@@ -76,13 +76,6 @@ ticker = FX_PAIRS[pair_label]  # used for yfinance
 
 period = st.sidebar.selectbox("History period:", ["6mo", "1y", "2y", "5y"], index=1)
 
-st.sidebar.markdown(
-    """
-    _Tip_: These are common FX crosses.  
-    You can also look up extra tickers on Yahoo Finance and add them to this list.
-    """
-)
-
 # -------------------------
 # HELPERS
 # -------------------------
@@ -90,6 +83,7 @@ def safe_last(series: pd.Series) -> float:
     """Return last non-NaN value of a Series, or NaN if empty."""
     s = series.dropna()
     return s.iloc[-1] if not s.empty else np.nan
+
 
 def compute_rsi(series: pd.Series, window: int = 14) -> pd.Series:
     """Compute a simple RSI with given window length."""
@@ -104,6 +98,132 @@ def compute_rsi(series: pd.Series, window: int = 14) -> pd.Series:
     rs = avg_gain / avg_loss.replace(0, np.nan)
     rsi = 100 - (100 / (1 + rs))
     return rsi
+
+
+def build_commentary(
+    close: pd.Series,
+    sma20: pd.Series,
+    sma50: pd.Series,
+    momentum20: pd.Series,
+    vol30: pd.Series,
+    vol90: pd.Series,
+    rsi14: pd.Series,
+) -> str:
+    """
+    Build a qualitative market scenario using:
+    - price vs SMAs
+    - slopes of SMAs
+    - 20d momentum
+    - 30d vs 90d volatility
+    - RSI
+    """
+    txt = []
+
+    # Last values
+    last_price = safe_last(close)
+    last_sma20 = safe_last(sma20)
+    last_sma50 = safe_last(sma50)
+    last_mom20 = safe_last(momentum20)
+    last_vol30 = safe_last(vol30)
+    last_vol90 = safe_last(vol90)
+    last_rsi = safe_last(rsi14)
+
+    # Slopes (use last 5 points if possible)
+    def slope_last(series: pd.Series, window: int = 5) -> float:
+        s = series.dropna()
+        if len(s) < window:
+            return 0.0
+        return s.iloc[-1] - s.iloc[-window]
+
+    slope_sma20 = slope_last(sma20)
+    slope_sma50 = slope_last(sma50)
+
+    # ---------------- TREND (SMA) ----------------
+    if (
+        not np.isnan(last_price)
+        and not np.isnan(last_sma20)
+        and not np.isnan(last_sma50)
+    ):
+        if last_price > last_sma20 > last_sma50 and slope_sma20 > 0 and slope_sma50 >= 0:
+            txt.append(
+                "- **Trend:** The pair is in a clear **uptrend (bullish)**. Price is above both the 20d and 50d moving averages, and both MAs are rising."
+            )
+        elif last_price < last_sma20 < last_sma50 and slope_sma20 < 0 and slope_sma50 <= 0:
+            txt.append(
+                "- **Trend:** The pair is in a clear **downtrend (bearish)**. Price is below both the 20d and 50d moving averages, and both MAs are declining."
+            )
+        else:
+            txt.append(
+                "- **Trend:** The signals are **mixed/sideways**. Price is not clearly above or below both moving averages, or the MAs are flat."
+            )
+
+    # ---------------- MOMENTUM (20d) ----------------
+    if not np.isnan(last_mom20):
+        if last_mom20 > 0.03:
+            txt.append(
+                f"- **Momentum:** Strong **positive momentum** over the last 20 days (≈ {last_mom20:.1%}). The currency has appreciated significantly recently."
+            )
+        elif last_mom20 > 0.0:
+            txt.append(
+                f"- **Momentum:** Mild **positive momentum** (≈ {last_mom20:.1%}), indicating a gentle upward bias."
+            )
+        elif last_mom20 < -0.03:
+            txt.append(
+                f"- **Momentum:** Strong **negative momentum** over the last 20 days (≈ {last_mom20:.1%}). The currency has depreciated markedly."
+            )
+        else:
+            txt.append(
+                f"- **Momentum:** Slight **negative or flat momentum** (≈ {last_mom20:.1%}). No strong directional move recently."
+            )
+
+    # ---------------- VOLATILITY ----------------
+    v30_hist = vol30.dropna()
+    if not v30_hist.empty and not np.isnan(last_vol30):
+        low_thr = v30_hist.quantile(0.25)
+        high_thr = v30_hist.quantile(0.75)
+
+        if last_vol30 > high_thr:
+            txt.append(
+                f"- **Risk (volatility):** Recent **short-term volatility is high** (30d vol ≈ {last_vol30:.1%}), above its usual range. Market conditions are relatively **unstable/risky**."
+            )
+        elif last_vol30 < low_thr:
+            txt.append(
+                f"- **Risk (volatility):** Recent **short-term volatility is low** (30d vol ≈ {last_vol30:.1%}), indicating a **calm and stable** market environment."
+            )
+        else:
+            txt.append(
+                f"- **Risk (volatility):** Short-term volatility (30d vol ≈ {last_vol30:.1%}) is in a **normal range** compared to its recent history."
+            )
+
+        if not np.isnan(last_vol90):
+            if last_vol30 > last_vol90:
+                txt.append(
+                    "- **Risk dynamics:** 30d volatility is above 90d volatility, suggesting that **risk has increased recently**."
+                )
+            elif last_vol30 < last_vol90:
+                txt.append(
+                    "- **Risk dynamics:** 30d volatility is below 90d volatility, suggesting that the market has **calmed down** compared to the medium-term."
+                )
+
+    # ---------------- RSI ----------------
+    if not np.isnan(last_rsi):
+        if last_rsi > 70:
+            txt.append(
+                f"- **RSI (14d):** RSI is around **{last_rsi:.0f}**, in the **overbought** zone. The currency has seen strong recent gains and may be stretched on the upside."
+            )
+        elif last_rsi < 30:
+            txt.append(
+                f"- **RSI (14d):** RSI is around **{last_rsi:.0f}**, in the **oversold** zone. The currency has experienced strong recent losses and may be stretched on the downside."
+            )
+        else:
+            txt.append(
+                f"- **RSI (14d):** RSI is around **{last_rsi:.0f}**, in a **neutral** range (30–70). No extreme overbought or oversold signal."
+            )
+
+    if not txt:
+        return "No sufficient data to build a scenario."
+
+    return "\n".join(txt)
 
 # -------------------------
 # MAIN LOGIC
@@ -144,6 +264,9 @@ if st.sidebar.button("Run analysis"):
         sma20 = close.rolling(20).mean()
         sma50 = close.rolling(50).mean()
 
+        # 20-day momentum
+        momentum20 = close / close.shift(20) - 1
+
         # Momentum (RSI 14d)
         rsi14 = compute_rsi(close, window=14)
 
@@ -155,6 +278,17 @@ if st.sidebar.button("Run analysis"):
         last_price = safe_last(close)
         last_vol30 = safe_last(vol30)
         last_vol90 = safe_last(vol90)
+
+        # Build qualitative scenario text
+        scenario_text = build_commentary(
+            close=close,
+            sma20=sma20,
+            sma50=sma50,
+            momentum20=momentum20,
+            vol30=vol30,
+            vol90=vol90,
+            rsi14=rsi14,
+        )
 
         # -------------------------
         # OVERVIEW + METRICS
@@ -184,7 +318,7 @@ if st.sidebar.button("Run analysis"):
                 "📉 Volatility",
                 "📊 Returns distribution",
                 "📐 Momentum (RSI)",
-                "📌 Stats table",
+                "📌 Stats table & Scenario",
                 "🔮 Forecasting",
             ]
         )
@@ -250,7 +384,7 @@ if st.sidebar.button("Run analysis"):
                 """
             )
 
-        # ---- TAB 5: SUMMARY STATISTICS ----
+        # ---- TAB 5: SUMMARY STATISTICS + SCENARIO ----
         with tab5:
             st.subheader("Summary Statistics")
 
@@ -261,9 +395,14 @@ if st.sidebar.button("Run analysis"):
                 "Annualized vol (last 90d)": [last_vol90],
                 "VaR 95% (daily)": [VaR_95],
                 "Expected Shortfall 95% (daily)": [ES_95],
+                "Momentum 20d (last)": [safe_last(momentum20)],
+                "RSI 14d (last)": [safe_last(rsi14)],
             }).T
             stats.columns = ["Value"]
             st.table(stats)
+
+            st.markdown("#### Qualitative market scenario")
+            st.markdown(scenario_text)
 
         # ---- TAB 6: FORECASTING ----
         with tab6:
